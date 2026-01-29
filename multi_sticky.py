@@ -1,223 +1,262 @@
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, Toplevel, Label, Button
 import os
+import json
+from theme_manager import ThemeManager
+from rich_text_editor import RichTextEditor
 
-# ================= UI SETTINGS (CUSTOMIZE HERE) =================
-APP_WIDTH = 820
-APP_HEIGHT = 480
-MIN_WIDTH = 720
-MIN_HEIGHT = 420
-
-FONT_MAIN = ("Segoe UI", 11)
-FONT_EDITOR = ("Segoe UI", 12)
-
-BG = "#000000"
-PANEL = "#0B0B0B"
-TEXT_BG = "#effbff"
-TEXT_COLOR = "#000000"
-ACCENT = "#00b7ff"
-LIST_HOVER_ACC = "#000000"
-LIST_BG = "#9baebc"
-BTN_HOVER = "#0095cc"
-# =================================================================
-
+# ================= UI SETTINGS =================
+APP_WIDTH = 900
+APP_HEIGHT = 600
+MIN_WIDTH = 800
+MIN_HEIGHT = 500
 NOTES_FOLDER = "my_notes"
+
 if not os.path.exists(NOTES_FOLDER):
     os.makedirs(NOTES_FOLDER)
 
-current_file = None
+class StickyNotesApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Advanced Sticky Notes")
+        self.root.geometry(f"{APP_WIDTH}x{APP_HEIGHT}")
+        self.root.minsize(MIN_WIDTH, MIN_HEIGHT)
+        
+        # Set Window Icon
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except Exception as e:
+                print(f"Could not load icon: {e}")
+        
+        self.tm = ThemeManager()
+        self.current_file = None
+        
+        self.setup_ui()
+        self.apply_theme()
+        self.refresh_notes()
 
-# ================= FUNCTIONS =================
-def refresh_notes():
-    notes_list.delete(0, tk.END)
-    for file in sorted(os.listdir(NOTES_FOLDER)):
-        if file.endswith(".txt"):
-            notes_list.insert(tk.END, file)
+        self.setup_ui()
+        self.apply_theme()
+        self.refresh_notes()
+        self.create_sidebar_context_menu()
+        
+        self.last_saved_content = []  # Track saved state
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-def new_note():
-    global current_file
-    current_file = None
-    text_area.delete("1.0", tk.END)
+    def setup_ui(self):
+        # Main Grid
+        self.root.grid_rowconfigure(1, weight=1) # Main content area
+        self.root.grid_columnconfigure(0, weight=0) # Sidebar
+        self.root.grid_columnconfigure(1, weight=1) # Editor
+        
+        # --- Toolbar (Top) ---
+        self.toolbar = tk.Frame(self.root, height=40)
+        self.toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.toolbar.pack_propagate(False)
+        
+        # Toolbar Buttons
+        self.btn_new = tk.Button(self.toolbar, text="New Note", command=self.new_note, relief="flat", padx=10, font=("Consolas", 10))
+        self.btn_new.pack(side="left", padx=2, pady=2)
+        
+        self.btn_save = tk.Button(self.toolbar, text="Save", command=self.save_note, relief="flat", padx=10, font=("Consolas", 10))
+        self.btn_save.pack(side="left", padx=2, pady=2)
 
-def save_note():
-    global current_file
-    content = text_area.get("1.0", tk.END).strip()
+        self.btn_card = tk.Button(self.toolbar, text="+ Card", command=lambda: self.editor.insert_card(), relief="flat", padx=10, font=("Consolas", 10))
+        self.btn_card.pack(side="left", padx=10, pady=2)
 
-    if not content:
-        messagebox.showwarning("Empty", "Note is empty!", parent=root)
-        return
+        self.btn_table = tk.Button(self.toolbar, text="+ Table", command=lambda: self.editor.insert_table(), relief="flat", padx=10, font=("Consolas", 10))
+        self.btn_table.pack(side="left", padx=2, pady=2)
 
-    if current_file is None:
-        name = simpledialog.askstring(
-            "File Name", "Enter note name:", parent=root
+        self.btn_settings = tk.Button(self.toolbar, text="Settings", command=self.open_settings, relief="flat", padx=10, font=("Consolas", 10))
+        self.btn_settings.pack(side="right", padx=2, pady=2)
+
+        # --- Sidebar (Left) ---
+        self.sidebar = tk.Frame(self.root, width=220)
+        self.sidebar.grid(row=1, column=0, sticky="ns")
+        self.sidebar.pack_propagate(False) # Force width
+        
+        self.lbl_notes = tk.Label(self.sidebar, text="My Notes", font=("Consolas", 12, "bold"))
+        self.lbl_notes.pack(fill="x", pady=5, padx=5)
+
+        self.notes_list = tk.Listbox(self.sidebar, font=("Consolas", 10), bd=0, highlightthickness=0)
+        self.notes_list.pack(fill="both", expand=True, padx=5, pady=5)
+        self.notes_list.bind("<<ListboxSelect>>", self.open_note)
+        
+        # --- Editor (Right) ---
+        self.editor_frame = tk.Frame(self.root)
+        self.editor_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
+        
+        self.editor = RichTextEditor(self.editor_frame, font=("Consolas", 11), wrap="word", relief="flat", padx=10, pady=10)
+        self.editor.pack(fill="both", expand=True)
+
+    def apply_theme(self):
+        colors = self.tm.colors
+        bg = colors["bg"]
+        fg = colors["fg"]
+        panel = colors["panel_bg"]
+        toolbar_bg = colors.get("toolbar_bg", panel)
+        accent = colors["accent"]
+        
+        self.root.configure(bg=bg)
+        self.toolbar.configure(bg=toolbar_bg)
+        self.sidebar.configure(bg=panel)
+        self.editor_frame.configure(bg=bg)
+        
+        # Buttons
+        for btn in self.toolbar.winfo_children():
+            btn.configure(bg=accent, fg="#ffffff", activebackground=colors.get("list_select", "#444"))
+            
+        # Lists and Labels
+        self.lbl_notes.configure(bg=panel, fg=fg)
+        self.notes_list.configure(
+            bg=colors["list_bg"], 
+            fg=colors["list_fg"],
+            selectbackground=colors["list_select"],
+            selectforeground=colors["list_fg"]
         )
-        if not name:
+        
+        # Editor
+        self.editor.configure(bg=colors["entry_bg"], fg=colors["entry_fg"], insertbackground=fg)
+
+    def refresh_notes(self):
+        self.notes_list.delete(0, tk.END)
+        for file in sorted(os.listdir(NOTES_FOLDER)):
+            if file.endswith(".json"):
+                self.notes_list.insert(tk.END, file.replace(".json", ""))
+
+    def new_note(self):
+        if self.check_unsaved_changes():
+            self.current_file = None
+            self.editor.delete("1.0", tk.END)
+            self.editor.widgets.clear()
+            self.last_saved_content = []
+
+    def save_note(self):
+        content = self.editor.get_content_json()
+        
+        if self.current_file is None:
+            name = simpledialog.askstring("Save Note", "Enter note name:", parent=self.root)
+            if not name: return
+            self.current_file = name
+        
+        file_path = os.path.join(NOTES_FOLDER, self.current_file + ".json")
+        try:
+            with open(file_path, "w") as f:
+                json.dump(content, f, indent=2)
+            self.refresh_notes()
+            self.last_saved_content = content
+            messagebox.showinfo("Saved", "Note saved successfully!", parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save: {e}", parent=self.root)
+
+    def open_note(self, event):
+        if not self.check_unsaved_changes():
             return
 
-        if not name.endswith(".txt"):
-            name += ".txt"
+        selection = self.notes_list.curselection()
+        if not selection: return
+        
+        note_name = self.notes_list.get(selection[0])
+        self.current_file = note_name
+        file_path = os.path.join(NOTES_FOLDER, note_name + ".json")
+        
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r") as f:
+                    content = json.load(f)
+                self.editor.load_content_json(content)
+                self.last_saved_content = content
+                self.last_saved_content = content
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open note: {e}")
 
-        if os.path.exists(os.path.join(NOTES_FOLDER, name)):
-            messagebox.showerror("Error", "File already exists!", parent=root)
-            return
+    def create_sidebar_context_menu(self):
+        self.sidebar_menu = tk.Menu(self.root, tearoff=0)
+        self.sidebar_menu.add_command(label="Rename", command=self.rename_note)
+        self.sidebar_menu.add_command(label="Delete", command=self.delete_note)
+        
+        self.notes_list.bind("<Button-3>", self.show_sidebar_menu)
 
-        current_file = name
+    def show_sidebar_menu(self, event):
+        # Select the item under cursor
+        try:
+            self.notes_list.selection_clear(0, tk.END)
+            self.notes_list.selection_set(self.notes_list.nearest(event.y))
+            self.notes_list.activate(self.notes_list.nearest(event.y))
+            self.sidebar_menu.post(event.x_root, event.y_root)
+        except:
+            pass
 
-    with open(os.path.join(NOTES_FOLDER, current_file), "w", encoding="utf-8") as f:
-        f.write(content)
+    def rename_note(self):
+        selection = self.notes_list.curselection()
+        if not selection: return
+        old_name = self.notes_list.get(selection[0])
+        
+        new_name = simpledialog.askstring("Rename Note", "Enter new name:", initialvalue=old_name, parent=self.root)
+        if new_name and new_name != old_name:
+            old_path = os.path.join(NOTES_FOLDER, old_name + ".json")
+            new_path = os.path.join(NOTES_FOLDER, new_name + ".json")
+            try:
+                os.rename(old_path, new_path)
+                self.refresh_notes()
+                if self.current_file == old_name:
+                    self.current_file = new_name
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not rename: {e}")
 
-    refresh_notes()
+    def delete_note(self):
+        selection = self.notes_list.curselection()
+        if not selection: return
+        name = self.notes_list.get(selection[0])
+        
+        if messagebox.askyesno("Delete Note", f"Are you sure you want to delete '{name}'?", parent=self.root):
+            path = os.path.join(NOTES_FOLDER, name + ".json")
+            try:
+                os.remove(path)
+                self.refresh_notes()
+                if self.current_file == name:
+                    self.new_note() # Clear editor if we deleted open note
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not delete: {e}")
 
-def open_note(event):
-    global current_file
-    selection = notes_list.curselection()
-    if not selection:
-        return
+    def check_unsaved_changes(self):
+        """Returns True if it's safe to proceed (saved or discarded), False if cancelled."""
+        current_content = self.editor.get_content_json()
+        if current_content != self.last_saved_content:
+            response = messagebox.askyesnocancel("Unsaved Changes", "You have unsaved changes. Do you want to save them?", parent=self.root)
+            if response is True: # Yes
+                self.save_note()
+                return True
+            elif response is False: # No
+                return True # User chose NOT to save, so we proceed
+            else: # Cancel (None)
+                return False
+        return True
 
-    file_name = notes_list.get(selection[0])
-    current_file = file_name
+    def on_closing(self):
+        if self.check_unsaved_changes():
+            self.root.destroy()
 
-    with open(os.path.join(NOTES_FOLDER, file_name), "r", encoding="utf-8") as f:
-        text_area.delete("1.0", tk.END)
-        text_area.insert("1.0", f.read())
+    def open_settings(self):
+        win = Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("300x200")
+        win.configure(bg=self.tm.get_color("panel_bg"))
+        
+        Label(win, text="Select Theme", bg=self.tm.get_color("panel_bg"), fg=self.tm.get_color("fg"), font=("Segoe UI", 12)).pack(pady=10)
+        
+        def set_theme(name):
+            self.tm.set_theme(name)
+            self.apply_theme()
+            win.destroy()
 
-def delete_note():
-    global current_file
-    selection = notes_list.curselection()
-    if not selection:
-        return
+        Button(win, text="Dark Mode", command=lambda: set_theme("Dark"), width=20, pady=5).pack(pady=5)
+        Button(win, text="Light Mode", command=lambda: set_theme("Light"), width=20, pady=5).pack(pady=5)
 
-    file_name = notes_list.get(selection[0])
-    confirm = messagebox.askyesno(
-        "Delete", f"Delete '{file_name}'?", parent=root
-    )
-    if not confirm:
-        return
 
-    os.remove(os.path.join(NOTES_FOLDER, file_name))
-    current_file = None
-    text_area.delete("1.0", tk.END)
-    refresh_notes()
-
-def rename_note():
-    global current_file
-    selection = notes_list.curselection()
-    if not selection:
-        messagebox.showwarning("Select", "Select a note first.", parent=root)
-        return
-
-    old_name = notes_list.get(selection[0])
-    new_name = simpledialog.askstring(
-        "Rename", "Enter new file name:", parent=root
-    )
-
-    if not new_name:
-        return
-
-    if not new_name.endswith(".txt"):
-        new_name += ".txt"
-
-    if os.path.exists(os.path.join(NOTES_FOLDER, new_name)):
-        messagebox.showerror("Error", "File already exists!", parent=root)
-        return
-
-    os.rename(
-        os.path.join(NOTES_FOLDER, old_name),
-        os.path.join(NOTES_FOLDER, new_name)
-    )
-
-    current_file = new_name
-    refresh_notes()
-
-# ================= UI =================
-root = tk.Tk()
-root.title("Sticky Notes Widget")
-root.geometry(f"{APP_WIDTH}x{APP_HEIGHT}")
-root.minsize(MIN_WIDTH, MIN_HEIGHT)   # ⭐ prevents hiding buttons
-root.configure(bg=BG)
-root.attributes("-topmost", True)
-root.resizable(True, True)            # ⭐ allow resizing
-
-# Grid layout (stable resizing)
-root.grid_rowconfigure(0, weight=1)
-root.grid_columnconfigure(0, weight=1)
-
-main_frame = tk.Frame(root, bg=BG)
-main_frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-
-main_frame.grid_rowconfigure(0, weight=1)
-main_frame.grid_columnconfigure(1, weight=1)
-
-# Left panel
-left_frame = tk.Frame(main_frame, bg=PANEL, width=220)
-left_frame.grid(row=0, column=0, sticky="ns", padx=(0, 12))
-
-left_frame.grid_rowconfigure(1, weight=1)
-
-tk.Label(
-    left_frame, text="📝 My Notes",
-    bg=PANEL, fg="white",
-    font=("Segoe UI", 13, "bold")
-).grid(row=0, column=0, pady=10)
-
-notes_list = tk.Listbox(
-    left_frame,
-    bg=LIST_BG,
-    fg="white",
-    selectbackground=LIST_HOVER_ACC,
-    selectforeground="white",
-    activestyle="none", 
-    font=FONT_MAIN,
-    relief="flat",
-    highlightthickness=0
-)
-notes_list.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-notes_list.bind("<<ListboxSelect>>", open_note)
-
-# Right panel
-right_frame = tk.Frame(main_frame, bg=PANEL)
-right_frame.grid(row=0, column=1, sticky="nsew")
-
-right_frame.grid_rowconfigure(0, weight=1)
-
-text_area = tk.Text(
-    right_frame,
-    bg=TEXT_BG,
-    fg=TEXT_COLOR,
-    insertbackground="white",
-    font=FONT_EDITOR,
-    relief="flat",
-    padx=14,
-    pady=14
-)
-text_area.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 6))
-
-# Buttons (always visible)
-btn_frame = tk.Frame(right_frame, bg=PANEL)
-btn_frame.grid(row=1, column=0, sticky="ew", pady=8)
-
-def create_button(parent, text, cmd):
-    btn = tk.Button(
-        parent,
-        text=text,
-        command=cmd,
-        bg=ACCENT,
-        fg="white",
-        font=("Segoe UI", 10, "bold"),
-        relief="flat",
-        padx=14,
-        pady=6,
-        cursor="hand2",
-        activebackground=BTN_HOVER
-    )
-    btn.bind("<Enter>", lambda e: btn.config(bg=BTN_HOVER))
-    btn.bind("<Leave>", lambda e: btn.config(bg=ACCENT))
-    return btn
-
-create_button(btn_frame, "🗒️New", new_note).pack(side="left", padx=6)
-create_button(btn_frame, "💾 Save", save_note).pack(side="left", padx=6)
-create_button(btn_frame, "📝 Rename", rename_note).pack(side="left", padx=6)
-create_button(btn_frame, "🗑 Delete", delete_note).pack(side="left", padx=6)
-
-refresh_notes()
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = StickyNotesApp(root)
+    root.mainloop()
